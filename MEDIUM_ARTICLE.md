@@ -32,223 +32,139 @@ Before we dive into code, let me sketch out how everything connects:
 
 It's like having a super-smart librarian who's read all your documents and can instantly find exactly what you need!
 
-## Setting Up the Development Environment
+## 📖 How It Works
 
-We started by creating a new Vite project with React and TypeScript:
+This application uses a Retrieval-Augmented Generation (RAG) pipeline to answer questions based on a PDF document. Here's a step-by-step breakdown of the process:
 
-```bash
-npm create vite@latest medi-chat -- --template react-ts
-cd medi-chat
-npm install
-```
+### 1. Loading the Document
 
-### Key Dependencies
+The first step is to load the PDF document from the `public/knowledge_base/` directory. We use LangChain's `PDFLoader` to load the document into memory.
 
-We carefully selected these packages to power our application:
-
-```bash
-# Core Dependencies
-npm install @supabase/supabase-js @langchain/community @langchain/openai \
-  @langchain/core pdf-parse pdfjs-dist react-query react-router-dom
-
-# Development Dependencies
-npm install -D @types/node @types/react @types/react-dom @typescript-eslint/parser \
-  @typescript-eslint/eslint-plugin eslint eslint-config-prettier eslint-plugin-react \
-  eslint-plugin-react-hooks eslint-plugin-jsx-a11y prettier typescript \
-  @vitejs/plugin-react vite-tsconfig-paths
-```
-
-## The Secret Sauce: Making Documents Talk
-
-This is where the magic happens. Here's how we turn boring documents into a chatty AI assistant:
-
-### 1. Document Loading and Preprocessing
-
-We implemented a robust document processing pipeline that handles various medical document formats. Here's how we process PDF documents:
-
+**File:** `src/utils/embeddingUtils.js`
 ```javascript
-// src/utils/embeddingUtils.js
-import { WebPDFLoader } from '@langchain/community/document_loaders/web/pdf';
-
-async function loadPDFDocument(file) {
-  const loader = new WebPDFLoader(file);
-  const docs = await loader.load();
-  return cleanDocs(docs);
-}
-
-function cleanText(text) {
-  return text
-    .replace(/[\x00-\x1F\x7F]/g, '')  // Remove control characters
-    .replace(/[\u200B-\u200F\uFEFF]/g, '')  // Remove invisible unicode
-    .replace(/\s+/g, ' ')  // Normalize whitespace
-    .replace(/Page\s+\d+(\s+of\s+\d+)?/gi, '')  // Remove page numbers
-    .trim();
-}
-
-function cleanDocs(docs) {
-  return docs
-    .map(doc => ({
-      ...doc,
-      pageContent: cleanText(doc.pageContent)
-    }))
-    .filter(doc => doc.pageContent.length > 20);  // Skip very short pages
-}
+const loader = new PDFLoader('knowledge_base/nabh_standards_guide.pdf');
+const docs = await loader.load();
 ```
 
-### 2. Vector Embeddings and Storage
+### 2. Creating Embeddings
 
-We used Supabase's vector store to store and retrieve document embeddings efficiently:
+Once the document is loaded, we split it into smaller, manageable chunks using the `RecursiveCharacterTextSplitter`. This allows us to create more focused embeddings for each section.
 
+**File:** `src/utils/embeddingUtils.js`
 ```javascript
-import { createClient } from '@supabase/supabase-js';
-import { SupabaseVectorStore } from '@langchain/community/vectorstores/supabase';
-import { OpenAIEmbeddings } from '@langchain/openai';
-
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-const openAIApiKey = import.meta.env.VITE_OPENAI_API_KEY;
-
-const embeddings = new OpenAIEmbeddings({ openAIApiKey });
-const client = createClient(supabaseUrl, supabaseKey);
-
-// Initialize vector store
-export const vectorStore = new SupabaseVectorStore(embeddings, {
-  client,
-  tableName: 'documents',
-  queryName: 'match_documents'
+const splitter = new RecursiveCharacterTextSplitter({
+  chunkSize: 512,
+  chunkOverlap: 64,
 });
+const splitDocs = await splitter.splitDocuments(docs);
 ```
 
-## Building the Chat Interface (AKA Making It Pretty)
+Next, we use OpenAI's embedding model to convert these text chunks into numerical vectors (embeddings).
 
-### 1. Message Component
-
-We created reusable components for displaying messages in the chat interface:
-
-```jsx
-// src/components/Message.jsx
-import { FiUser, FiMessageSquare } from 'react-icons/fi';
-
-export function Message({ message, isUser }) {
-  return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-4`}>
-      <div className={`flex max-w-3xl ${isUser ? 'flex-row-reverse' : 'flex-row'} items-start`}>
-        <div className={`flex-shrink-0 h-8 w-8 rounded-full flex items-center justify-center ${isUser ? 'bg-blue-100 text-blue-600' : 'bg-gray-100 text-gray-600'}`}>
-          {isUser ? <FiUser /> : <FiMessageSquare />}
-        </div>
-        <div className={`mx-3 px-4 py-2 rounded-lg ${isUser ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-800'}`}>
-          <p className="whitespace-pre-wrap">{message}</p>
-        </div>
-      </div>
-    </div>
-  );
-}
-```
-
-### 2. Chat Input Component
-
-A responsive input component for sending messages:
-
-```jsx
-// src/components/ChatInput.jsx
-export function ChatInput({ onSend, disabled }) {
-  const [message, setMessage] = useState('');
-
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (message.trim() && !disabled) {
-      onSend(message);
-      setMessage('');
-    }
-  };
-
-  return (
-    <form onSubmit={handleSubmit} className="mt-4">
-      <div className="flex rounded-lg border border-gray-300 overflow-hidden">
-        <input
-          type="text"
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          disabled={disabled}
-          placeholder="Ask a question about the documents..."
-          className="flex-1 px-4 py-2 focus:outline-none"
-        />
-        <button
-          type="submit"
-          disabled={!message.trim() || disabled}
-          className="bg-blue-500 text-white px-4 py-2 disabled:opacity-50"
-        >
-          Send
-        </button>
-      </div>
-    </form>
-  );
-}
-```
-
-## Teaching AI to Chat (Without the Awkward Pauses)
-
-We used LangChain to create a sophisticated conversation flow that maintains context and provides accurate responses:
-
+**File:** `src/utils/embeddingUtils.js`
 ```javascript
-// src/utils/conversationChain.js
-import { PromptTemplate } from '@langchain/core/prompts';
-import { RunnablePassthrough, RunnableSequence } from '@langchain/core/runnables';
-import { StringOutputParser } from '@langchain/core/output_parsers';
+const embeddings = new OpenAIEmbeddings();
+```
 
-const standaloneQuestionTemplate = `Given some conversation history (if any) and a question, 
-convert the question to a standalone question.
-conversation history: {conv_history}
-question: {question}
-standalone question:`;
+### 3. Storing Embeddings in Supabase
 
-const answerTemplate = `As a medical assistant knowledgeable about NABH standards, 
+These embeddings are then stored in a Supabase vector database. This allows us to efficiently search for the most relevant document chunks when a user asks a question.
+
+**File:** `src/utils/embeddingUtils.js`
+```javascript
+const vectorStore = await SupabaseVectorStore.fromDocuments(
+  splitDocs,
+  embeddings,
+  {
+    client,
+    tableName: 'documents',
+    queryName: 'match_documents',
+  }
+);
+```
+
+### 4. Creating a Standalone Question
+
+When a user asks a question, it might be part of an ongoing conversation. To ensure the question is self-contained, we first pass it through a `standaloneQuestionChain`. This chain uses the conversation history to rephrase the question into a standalone query.
+
+**File:** `src/utils/langchain.js`
+```javascript
+const standaloneQuestionTemplate = `Given some conversation history (if any) and a question,
+ convert the question to a standalone question.
+ conversation history: {conv_history}
+ question: {question}
+ standalone question:`
+
+const standaloneQuestionPrompt = PromptTemplate.fromTemplate(standaloneQuestionTemplate)
+
+const standaloneQuestionChain = standaloneQuestionPrompt.pipe(llm).pipe(new StringOutputParser());
+```
+
+### 5. Retrieving Relevant Documents
+
+Once we have a standalone question, we use the `retriever` to search the Supabase vector store for the most relevant document chunks. The retriever is created from our vector store and is responsible for fetching the context needed to answer the question.
+
+**File:** `src/utils/embeddingUtils.js`
+```javascript
+export const retriever = vectorStore.asRetriever();
+```
+
+This retriever is then used in a `retrieverChain` to fetch the relevant documents.
+
+**File:** `src/utils/langchain.js`
+```javascript
+const retrieverChain = RunnableSequence.from([
+  prevResult => prevResult.standalone_question,
+  retriever,
+  combineDocuments
+])
+```
+
+### 6. Answering the Question
+
+Finally, we use an `answerChain` to generate a response. This chain takes the standalone question and the retrieved document chunks (the context) and passes them to the OpenAI model. The model then generates a human-like answer based on the provided information.
+
+**File:** `src/utils/langchain.js`
+```javascript
+const answerTemplate = `
+Prompt:
+As a medical assistant knowledgeable about NABH standards, 
 your goal is to provide accurate answers to questions raised by the end user. 
 You should rely on the context provided and refer to the conversation history when 
-necessary to ensure the correctness of your responses.
+necessary to ensure the correctness of your responses. Avoid fabricating information; 
+if uncertain, humbly seek advice from a human and maintain a friendly demeanor throughout. 
+Your role is to assist as a reliable source of information while maintaining a 
+supportive and approachable tone. Remember to prioritize accuracy and clarity in your responses.
+context: {context}
+question: {question}
+conversation history: {conv_history}
+answer: `
 
-Context: {context}
-
-Question: {question}
-
-Conversation History: {conv_history}
-
-Answer:`;
-
-// Create prompt templates
-const standaloneQuestionPrompt = PromptTemplate.fromTemplate(standaloneQuestionTemplate);
 const answerPrompt = PromptTemplate.fromTemplate(answerTemplate);
-
-// Create the conversation chain
-export function createConversationChain(llm, retriever) {
-  const standaloneQuestionChain = standaloneQuestionPrompt
-    .pipe(llm)
-    .pipe(new StringOutputParser());
-
-  const retrieverChain = RunnableSequence.from([
-    prevResult => prevResult.standalone_question,
-    retriever,
-    combineDocuments
-  ]);
-
-  const answerChain = answerPrompt
-    .pipe(llm)
-    .pipe(new StringOutputParser());
-
-  return RunnableSequence.from([
-    {
-      standalone_question: standaloneQuestionChain,
-      original_input: new RunnablePassthrough()
-    },
-    {
-      context: retrieverChain,
-      question: ({ original_input }) => original_input.question,
-      conv_history: ({ original_input }) => original_input.conv_history
-    },
-    answerChain
-  ]);
-}
+const answerChain = answerPrompt.pipe(llm).pipe(new StringOutputParser())
 ```
+
+### 7. Combining the Chains
+
+All these individual chains are combined into a single, powerful `RunnableSequence`. This sequence orchestrates the entire process, from creating a standalone question to generating the final answer.
+
+**File:** `src/utils/langchain.js`
+```javascript
+const chain = RunnableSequence.from([
+  {
+    standalone_question: standaloneQuestionChain,
+    original_input: new RunnablePassthrough()
+  },
+  {
+    context: retrieverChain,
+    question: ({ original_input }) => original_input.question,
+    conv_history: ({ original_input }) => original_input.conv_history,
+  },
+  answerChain
+])
+```
+
+This final chain is what we invoke in our application to get a response to the user's question.
 
 ## Keeping Things Secure (Because We're Responsible Like That)
 
@@ -418,11 +334,11 @@ If you get stuck or have questions, don't hesitate to reach out. The dev communi
 
 ## Let's Connect!
 
-Hey, I'm [Your Name]! I build things with code and write about my journey. If you found this article helpful or have questions, I'd love to hear from you!
+Hey, I'm Pallav! I build things with code and write about my journey. If you found this article helpful or have questions, I'd love to hear from you!
 
-- Follow me on [Twitter/LinkedIn] for more tech insights
-- Check out my [blog/portfolio] for other cool projects
-- Star the [GitHub repo](https://github.com/yourusername/medi-chat) if you found this useful
+- Follow me on [LinkedIn](https://www.linkedin.com/in/pallav-agarwal-576b3b1b/) for more tech insights
+- Check out my [GitHub](https://github.com/pallavagarwal07) for other cool projects
+- Star the [GitHub repo](https://github.com/pallavagarwal07/medi-chat) if you found this useful
 
 ## One Last Thing...
 
